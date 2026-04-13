@@ -290,7 +290,7 @@ function App() {
                     <span className="format-pill">.docx</span>
                     <span className="format-pill">.pdf</span>
                   </div>
-                  <p className="upload-sub-text">Max 50MB</p>
+                  <p className="upload-sub-text">Max 100MB</p>
                 </>
               )}
             </div>

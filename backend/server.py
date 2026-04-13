@@ -490,8 +490,8 @@ async def upload_file(file: UploadFile = File(...)):
     file_path = UPLOAD_DIR / f"{job_id}.{file_type}"
 
     content = await file.read()
-    if len(content) > 50 * 1024 * 1024:
-        raise HTTPException(400, "File too large (max 50MB)")
+    if len(content) > 100 * 1024 * 1024:
+        raise HTTPException(400, "File too large (max 100MB)")
 
     with open(file_path, "wb") as f:
         f.write(content)
