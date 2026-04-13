@@ -12,4 +12,3 @@ memory/
 design_guidelines.json
 backend_test.py
 test_result.md
-yarn.lock
