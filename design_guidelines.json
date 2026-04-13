@@ -1,0 +1,68 @@
+{
+  "theme": "light",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "colors": {
+    "primary": "#002FA7",
+    "primary_hover": "#00227A",
+    "secondary": "#FF2A00",
+    "background": "#FFFFFF",
+    "surface": "#F4F4F5",
+    "surface_hover": "#E4E4E7",
+    "border": "#E4E4E7",
+    "text_main": "#09090B",
+    "text_muted": "#52525B"
+  },
+  "typography": {
+    "heading_font": "Outfit",
+    "body_font": "IBM Plex Sans",
+    "h1": "text-4xl sm:text-5xl font-black tracking-tighter text-[#09090B]",
+    "h2": "text-2xl sm:text-3xl font-bold tracking-tight text-[#09090B]",
+    "h3": "text-xl sm:text-2xl font-semibold tracking-tight text-[#09090B]",
+    "body": "text-base leading-relaxed text-[#52525B]",
+    "small_label": "text-xs font-bold uppercase tracking-[0.2em] text-[#52525B]"
+  },
+  "spacing_and_layout": {
+    "container_padding": "p-6 md:p-12 lg:p-16",
+    "gap_primary": "gap-6 md:gap-8",
+    "grid_strategy": "Control Room Grid: Tight gaps (gap-4 or gap-6), functional density. Use border-collapse style layouts for forms and settings.",
+    "alignment": "Left-align dense content and forms. Center-align hero headings for impact."
+  },
+  "surfaces_and_borders": {
+    "header": "backdrop-blur-xl bg-white/70 border-b border-black/5 shadow-sm sticky top-0 z-50",
+    "cards": "bg-[#FFFFFF] border border-[#E4E4E7] shadow-sm rounded-none md:rounded-lg",
+    "uploader_zone": "border-2 border-dashed border-[#E4E4E7] bg-[#F4F4F5] hover:bg-[#E4E4E7] transition-colors duration-200 flex flex-col items-center justify-center p-12",
+    "input_fields": "bg-[#FFFFFF] border border-[#E4E4E7] focus:border-[#002FA7] focus:ring-1 focus:ring-[#002FA7] rounded-none md:rounded-sm transition-all text-[#09090B]"
+  },
+  "motion_and_interaction": {
+    "hover_states": "hover:-translate-y-0.5 transition-transform duration-200 ease-in-out",
+    "buttons": "active:scale-95 transition-all duration-150",
+    "progress_bar": "transition-all duration-500 ease-out bg-[#002FA7]",
+    "focus_states": "focus-visible:ring-2 focus-visible:ring-[#002FA7] focus-visible:outline-none"
+  },
+  "components": {
+    "button_primary": "bg-[#002FA7] text-white font-medium px-6 py-3 hover:bg-[#00227A] focus:ring-2 focus:ring-[#002FA7]/50 flex items-center justify-center gap-2",
+    "button_secondary": "bg-[#F4F4F5] text-[#09090B] font-medium px-6 py-3 border border-[#E4E4E7] hover:bg-[#E4E4E7] hover:text-[#09090B] flex items-center justify-center gap-2",
+    "badge": "px-2 py-1 bg-[#F4F4F5] text-[#09090B] text-xs font-bold uppercase tracking-wider border border-[#E4E4E7]",
+    "segmented_control": "flex p-1 bg-[#F4F4F5] border border-[#E4E4E7]"
+  },
+  "accessibility_and_testing": {
+    "contrast_check": "Ensure #002FA7 against #FFFFFF meets 4.5:1 ratio. Provide high contrast focus rings.",
+    "data_testid_rules": "All interactive elements MUST include data-testid attributes (e.g., 'upload-dropzone', 'language-select', 'translate-submit-button', 'download-button')."
+  },
+  "media": {
+    "image_urls": {},
+    "icons_library": "lucide-react"
+  },
+  "instructions_to_main_agent": [
+    "Build a clean, Swiss-style layout. Avoid rounded corners if possible, lean towards sharp or max 4px border-radius.",
+    "Use a prominent Drag & Drop area for the PPTX file upload.",
+    "For the Tone Selection, use a stylized segmented control or radio group (Formal, Academic, General).",
+    "For Language Selection, provide a dropdown (Select) with popular languages and an 'Other' option that reveals a text input.",
+    "Show a clear, determinate progress bar during the translation phase, preferably with a monospaced percentage counter.",
+    "Display a text preview of some translated slides before allowing download.",
+    "Ensure all buttons and inputs have the required data-testid attributes.",
+    "Do NOT use placeholder images or generic 'lorem ipsum' where real data structure would make sense.",
+    "Stick rigidly to the color palette. The UI should be predominantly white/grey, with #002FA7 used strictly for primary actions and active states.",
+    "Use standard HTML inputs customized with Tailwind for simpler forms, but use Shadcn UI components for complex elements like Select or Progress if preferred, ensuring they are stripped of default rounded Vercel-look."
+  ]
+}
