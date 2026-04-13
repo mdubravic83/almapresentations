@@ -1,0 +1,15 @@
+node_modules/
+build/
+.env
+*.pyc
+__pycache__/
+mongo_data/
+test_reports/
+tests/
+*.pptx
+*.docx
+memory/
+design_guidelines.json
+backend_test.py
+test_result.md
+yarn.lock
