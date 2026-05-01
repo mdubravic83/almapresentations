@@ -1,9 +1,10 @@
 FROM python:3.11-slim
 
-# Install LibreOffice + poppler (needed for visual slide preview)
+# Install LibreOffice + poppler (visual preview) + Tesseract OCR (image-based PDFs)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-impress libreoffice-writer libreoffice-common \
     poppler-utils \
+    tesseract-ocr tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

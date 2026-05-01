@@ -1,11 +1,12 @@
 # ══════════════════════════════════════════════
-# SlideTranslate - Docker Compose for CloudPanel VPS
+# SlideTranslate - Docker Compose for VPS Deploy
 # ══════════════════════════════════════════════
 #
 # DEPLOY:
 #   1. cp .env.example .env && nano .env  (add OPENAI_API_KEY)
 #   2. docker compose up -d --build
-#   3. In CloudPanel: create Reverse Proxy site → http://127.0.0.1:8090
+#   3. App available at http://<YOUR_IP>:8090
+#   4. (Optional) Set up reverse proxy (Nginx/Caddy) for HTTPS
 #
 # ══════════════════════════════════════════════
 
@@ -41,7 +42,7 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
       args:
-        - REACT_APP_BACKEND_URL=
+        - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL:-}
     restart: unless-stopped
     ports:
       - "8090:80"
