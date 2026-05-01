@@ -15,7 +15,7 @@ from docx import Document
 import fitz  # PyMuPDF for PDF creation
 
 # Use the public backend URL from frontend .env
-BACKEND_URL = "https://admiring-wilson-10.preview.emergentagent.com"
+BACKEND_URL = "https://slide-translator-app.preview.emergentagent.com"
 API_BASE = f"{BACKEND_URL}/api"
 
 class PPTXTranslatorTester:
