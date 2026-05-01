@@ -257,7 +257,8 @@ def extract_pdf_segments(path: str) -> tuple:
 
 def extract_pdf_segments_ocr(path: str) -> list:
     """Extract text segments from image-based PDF using OCR (Tesseract).
-    Returns segments with bounding box data for rebuilding.
+    Uses line-level bounding boxes with background color sampling for precise overlay rebuild.
+    Returns segments with line-level detail for rebuilding.
     """
     doc = fitz.open(path)
     segments = []
@@ -268,6 +269,7 @@ def extract_pdf_segments_ocr(path: str) -> list:
         # Render page as high-res image for OCR
         pix = page.get_pixmap(dpi=render_dpi)
         img = Image.open(io.BytesIO(pix.tobytes("png")))
+        img_width, img_height = img.size
 
         # OCR with bounding box data
         data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
@@ -287,70 +289,156 @@ def extract_pdf_segments_ocr(path: str) -> list:
                         'top': data['top'][i],
                         'right': data['left'][i] + data['width'][i],
                         'bottom': data['top'][i] + data['height'][i],
+                        'height': data['height'][i],
                     }
                 lines[key]['words'].append(text)
                 lines[key]['left'] = min(lines[key]['left'], data['left'][i])
                 lines[key]['top'] = min(lines[key]['top'], data['top'][i])
                 lines[key]['right'] = max(lines[key]['right'], data['left'][i] + data['width'][i])
                 lines[key]['bottom'] = max(lines[key]['bottom'], data['top'][i] + data['height'][i])
+                lines[key]['height'] = max(lines[key]['height'], data['height'][i])
 
-        # Group lines into blocks
-        blocks = {}
-        for (block_num, line_num), line_data in sorted(lines.items()):
-            if block_num not in blocks:
-                blocks[block_num] = {
-                    'text': '',
-                    'left': line_data['left'],
-                    'top': line_data['top'],
-                    'right': line_data['right'],
-                    'bottom': line_data['bottom'],
-                }
-            line_text = ' '.join(line_data['words'])
-            if blocks[block_num]['text']:
-                blocks[block_num]['text'] += ' ' + line_text
-            else:
-                blocks[block_num]['text'] = line_text
-            blocks[block_num]['left'] = min(blocks[block_num]['left'], line_data['left'])
-            blocks[block_num]['top'] = min(blocks[block_num]['top'], line_data['top'])
-            blocks[block_num]['right'] = max(blocks[block_num]['right'], line_data['right'])
-            blocks[block_num]['bottom'] = max(blocks[block_num]['bottom'], line_data['bottom'])
+        # Helper: sample background color around a bounding box
+        def sample_bg_color(left, top, right, bottom):
+            samples = []
+            offsets = [(-10, 0), (10, 0), (0, -5), (0, 5), (-10, -5), (10, 5)]
+            for dx, dy in offsets:
+                for sx, sy in [(left + dx, (top + bottom) // 2 + dy),
+                               (right + dx, (top + bottom) // 2 + dy),
+                               ((left + right) // 2, top + dy),
+                               ((left + right) // 2, bottom + dy)]:
+                    sx = max(0, min(int(sx), img_width - 1))
+                    sy = max(0, min(int(sy), img_height - 1))
+                    pixel = img.getpixel((sx, sy))
+                    samples.append(pixel[:3])
+            if not samples:
+                return (255, 255, 255)
+            # Use median to avoid outliers
+            r = sorted([c[0] for c in samples])[len(samples) // 2]
+            g = sorted([c[1] for c in samples])[len(samples) // 2]
+            b = sorted([c[2] for c in samples])[len(samples) // 2]
+            return (r, g, b)
 
-        # Convert pixel coords to PDF points (72 DPI)
+        # Helper: detect text color (sample pixels within the text area)
+        def sample_text_color(left, top, right, bottom):
+            samples = []
+            # Sample center pixels of the text area
+            cx = (left + right) // 2
+            cy = (top + bottom) // 2
+            for dx in range(-20, 21, 10):
+                for dy in range(-5, 6, 5):
+                    sx = max(0, min(cx + dx, img_width - 1))
+                    sy = max(0, min(cy + dy, img_height - 1))
+                    pixel = img.getpixel((sx, sy))
+                    samples.append(pixel[:3])
+            if not samples:
+                return (0, 0, 0)
+            # Find darkest pixels (likely text)
+            samples.sort(key=lambda c: sum(c))
+            darkest = samples[:len(samples) // 3 + 1]
+            r = sum(c[0] for c in darkest) // len(darkest)
+            g = sum(c[1] for c in darkest) // len(darkest)
+            b = sum(c[2] for c in darkest) // len(darkest)
+            return (r, g, b)
+
         scale = 72.0 / render_dpi
         page_rect = page.rect
 
-        for block_num, b in sorted(blocks.items()):
-            text = b['text'].strip()
-            if not text or len(text) < 2:
-                continue
-            # Skip if it looks like OCR noise
-            if text.startswith("http"):
+        # Build line-level segments for each block
+        # Group lines by block for translation context
+        block_lines = {}
+        for (block_num, line_num), line_data in sorted(lines.items()):
+            if block_num not in block_lines:
+                block_lines[block_num] = []
+            line_text = ' '.join(line_data['words'])
+            if not line_text.strip() or len(line_text.strip()) < 2:
                 continue
 
-            # Convert pixel coordinates to PDF point coordinates
-            x0 = b['left'] * scale
-            y0 = b['top'] * scale
-            x1 = b['right'] * scale
-            y1 = b['bottom'] * scale
+            # Get background and text colors
+            bg_color = sample_bg_color(line_data['left'], line_data['top'],
+                                        line_data['right'], line_data['bottom'])
+            text_color = sample_text_color(line_data['left'], line_data['top'],
+                                           line_data['right'], line_data['bottom'])
 
-            # Clamp to page bounds
+            # Convert pixel coordinates to PDF points
+            x0 = line_data['left'] * scale
+            y0 = line_data['top'] * scale
+            x1 = line_data['right'] * scale
+            y1 = line_data['bottom'] * scale
+            line_height = line_data['height'] * scale
+
+            # Clamp to page
             x0 = max(0, min(x0, page_rect.width))
             y0 = max(0, min(y0, page_rect.height))
             x1 = max(0, min(x1, page_rect.width))
             y1 = max(0, min(y1, page_rect.height))
 
+            # Filter out OCR noise lines
+            import re
+            clean_text = line_text.strip()
+            alpha_chars = sum(1 for c in clean_text if c.isalpha())
+            total_chars = len(clean_text)
+            if total_chars > 0 and alpha_chars / total_chars < 0.5:
+                continue  # Skip lines with less than 50% alphabetic chars
+
+            # Skip lines with mostly short garbage words (OCR noise)
+            words = clean_text.split()
+            if words:
+                avg_word_len = sum(len(w) for w in words) / len(words)
+                short_words = sum(1 for w in words if len(w) <= 2)
+                # Noise patterns: short garbled words, pipe chars, excessive parens
+                has_pipe = '|' in clean_text
+                if len(words) >= 3 and avg_word_len < 3.5 and (short_words / len(words) > 0.3 or has_pipe):
+                    continue  # OCR noise
+
+            block_lines[block_num].append({
+                'text': clean_text,
+                'bbox': [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)],
+                'line_height': round(line_height, 2),
+                'bg_color': list(bg_color),
+                'text_color': list(text_color),
+            })
+
+        # Create segments: one per block (for translation), but store line details
+        for block_num in sorted(block_lines.keys()):
+            blines = block_lines[block_num]
+            if not blines:
+                continue
+
+            full_text = ' '.join(l['text'] for l in blines)
+            if not full_text.strip() or full_text.startswith("http"):
+                continue
+
+            # Clean OCR artifacts from text
+            # Remove common OCR noise prefixes/suffixes
+            clean_full = full_text.strip()
+            # Remove leading special chars like €), a , etc.
+            clean_full = re.sub(r'^[€$£¥@#&*|<>\[\](){}\d]+[)\s.]+', '', clean_full).strip()
+            # Remove trailing noise
+            clean_full = re.sub(r'[\[\](){}<>|]+$', '', clean_full).strip()
+
+            if not clean_full or len(clean_full) < 3:
+                continue
+
+            # Overall block bbox
+            x0 = min(l['bbox'][0] for l in blines)
+            y0 = min(l['bbox'][1] for l in blines)
+            x1 = max(l['bbox'][2] for l in blines)
+            y1 = max(l['bbox'][3] for l in blines)
+
             segments.append({
                 "idx": idx,
                 "slide_num": page_num + 1,
-                "original": text,
+                "original": clean_full,
                 "translated": None,
                 "translatable": True,
                 "ocr_bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)],
+                "ocr_lines": blines,
             })
             idx += 1
 
     doc.close()
-    logger.info(f"OCR extracted {len(segments)} text segments")
+    logger.info(f"OCR extracted {len(segments)} text segments with line-level detail")
     return segments
 
 
@@ -365,139 +453,101 @@ def rebuild_pdf(original_path: str, output_path: str, translations: dict, is_ocr
     FONT_BOLD_NAME = "libsansbold"
 
     if is_ocr:
-        # For OCR-based (image) PDFs: preserve original pages intact,
-        # add a clean translation page after each original page.
+        # For OCR-based (image) PDFs: overlay translated text directly on the original page
+        # using line-level precision with background color matching.
+        # translations dict: {idx: {"text": ..., "bbox": ..., "page": ..., "original": ..., "lines": [...]}}
 
-        # Group translations by page
-        page_translations = {}
         for idx_key, tdata in translations.items():
             if not isinstance(tdata, dict):
                 continue
             page_idx = tdata.get("page", 0)
-            if page_idx not in page_translations:
-                page_translations[page_idx] = []
-            page_translations[page_idx].append(tdata)
+            if page_idx >= len(doc):
+                continue
+            page = doc[page_idx]
+            translated = tdata.get("text", "")
+            ocr_lines = tdata.get("lines", [])
 
-        # Process pages in reverse order so inserting doesn't shift indices
-        for page_idx in sorted(page_translations.keys(), reverse=True):
-            segments = page_translations[page_idx]
-            orig_page = doc[page_idx]
-            page_width = orig_page.rect.width
-            page_height = orig_page.rect.height
+            if not translated or not ocr_lines:
+                continue
 
-            # Insert a new translation page right after the original
-            new_page = doc.new_page(pno=page_idx + 1, width=page_width, height=page_height)
+            # Split translated text into roughly the same number of lines as original
+            original_lines_text = [l['text'] for l in ocr_lines]
+            num_lines = len(ocr_lines)
 
-            # Light background
-            new_page.draw_rect(new_page.rect, color=None, fill=(0.98, 0.98, 0.97))
+            # Smart line splitting: try to distribute translated text across available lines
+            translated_words = translated.split()
+            if num_lines == 1:
+                translated_lines = [translated]
+            else:
+                # Distribute words proportionally based on original line lengths
+                orig_lengths = [len(lt) for lt in original_lines_text]
+                total_orig_len = sum(orig_lengths) or 1
+                translated_lines = []
+                word_idx = 0
+                for i, orig_len in enumerate(orig_lengths):
+                    proportion = orig_len / total_orig_len
+                    num_words = max(1, round(len(translated_words) * proportion))
+                    if i == num_lines - 1:
+                        # Last line gets remaining words
+                        line_words = translated_words[word_idx:]
+                    else:
+                        line_words = translated_words[word_idx:word_idx + num_words]
+                    translated_lines.append(' '.join(line_words))
+                    word_idx += num_words
 
-            margin = 50
-            y_cursor = margin
-
-            # Header
-            header_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + 30)
-            new_page.insert_textbox(
-                header_rect,
-                f"TRANSLATION - Page {page_idx + 1}",
-                fontsize=18,
-                fontname=FONT_BOLD_NAME,
-                fontfile=FONT_BOLD_PATH,
-                color=(0.15, 0.15, 0.15),
-                align=0,
-            )
-            y_cursor += 38
-
-            # Separator line
-            new_page.draw_line(
-                fitz.Point(margin, y_cursor),
-                fitz.Point(page_width - margin, y_cursor),
-                color=(0.6, 0.6, 0.6),
-                width=0.8,
-            )
-            y_cursor += 20
-
-            # Add each translated segment
-            for seg in segments:
-                original = seg.get("original", "")
-                translated = seg.get("text", "")
-                if not translated:
+            # Overlay each translated line at the corresponding original line position
+            for i, line_info in enumerate(ocr_lines):
+                if i >= len(translated_lines) or not translated_lines[i].strip():
                     continue
 
-                available_height = page_height - y_cursor - margin
-                if available_height < 100:
-                    new_page = doc.new_page(pno=-1, width=page_width, height=page_height)
-                    new_page.draw_rect(new_page.rect, color=None, fill=(0.98, 0.98, 0.97))
-                    y_cursor = margin
+                bbox = line_info['bbox']
+                bg_color = line_info.get('bg_color', [255, 255, 255])
+                text_color = line_info.get('text_color', [0, 0, 0])
+                line_height = line_info.get('line_height', bbox[3] - bbox[1])
 
-                # Original text label
-                label_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + 16)
-                new_page.insert_textbox(
-                    label_rect,
-                    "ORIGINAL:",
-                    fontsize=8,
-                    fontname=FONT_BOLD_NAME,
-                    fontfile=FONT_BOLD_PATH,
-                    color=(0.45, 0.45, 0.45),
-                    align=0,
+                # Create rect with small padding
+                pad_x = 4
+                pad_y = 2
+                rect = fitz.Rect(
+                    bbox[0] - pad_x,
+                    bbox[1] - pad_y,
+                    bbox[2] + pad_x,
+                    bbox[3] + pad_y,
                 )
-                y_cursor += 17
 
-                # Original text
-                orig_display = original[:400]
-                chars_per_line = max(1, int((page_width - 2 * margin) / 6))
-                est_lines = max(1, (len(orig_display) // chars_per_line) + 1)
-                orig_height = max(30, est_lines * 16)
+                # Cover original text with background-colored rectangle
+                fill_color = (bg_color[0] / 255.0, bg_color[1] / 255.0, bg_color[2] / 255.0)
+                page.draw_rect(rect, color=fill_color, fill=fill_color)
 
-                orig_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + orig_height)
-                new_page.insert_textbox(
-                    orig_rect,
-                    orig_display,
-                    fontsize=10,
-                    fontname=FONT_NAME,
-                    fontfile=FONT_PATH,
-                    color=(0.4, 0.4, 0.4),
-                    align=0,
+                # Calculate font size based on line height
+                font_size = min(line_height * 0.75, 60)
+                font_size = max(font_size, 6)
+
+                # Determine text color
+                tc = (text_color[0] / 255.0, text_color[1] / 255.0, text_color[2] / 255.0)
+                # If background is dark, use white text
+                bg_brightness = (bg_color[0] + bg_color[1] + bg_color[2]) / 3
+                if bg_brightness < 100:
+                    tc = (1.0, 1.0, 1.0)
+                elif bg_brightness > 200:
+                    tc = (0.05, 0.05, 0.05)
+
+                # Use bold font for larger text (likely headings)
+                use_bold = font_size > 20
+                fn = FONT_BOLD_NAME if use_bold else FONT_NAME
+                ff = FONT_BOLD_PATH if use_bold else FONT_PATH
+
+                # Insert translated text
+                text_rect = fitz.Rect(bbox[0], bbox[1], bbox[2] + pad_x * 2, bbox[3] + pad_y)
+                page.insert_textbox(
+                    text_rect,
+                    translated_lines[i],
+                    fontsize=font_size,
+                    fontname=fn,
+                    fontfile=ff,
+                    color=tc,
+                    align=1,  # center align
                 )
-                y_cursor += orig_height + 8
-
-                # Translated text label
-                label_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + 16)
-                new_page.insert_textbox(
-                    label_rect,
-                    "TRANSLATED:",
-                    fontsize=8,
-                    fontname=FONT_BOLD_NAME,
-                    fontfile=FONT_BOLD_PATH,
-                    color=(0.05, 0.4, 0.25),
-                    align=0,
-                )
-                y_cursor += 17
-
-                # Translated text
-                trans_display = translated[:400]
-                est_lines = max(1, (len(trans_display) // chars_per_line) + 1)
-                trans_height = max(30, est_lines * 18)
-
-                trans_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + trans_height)
-                new_page.insert_textbox(
-                    trans_rect,
-                    trans_display,
-                    fontsize=12,
-                    fontname=FONT_BOLD_NAME,
-                    fontfile=FONT_BOLD_PATH,
-                    color=(0.05, 0.05, 0.05),
-                    align=0,
-                )
-                y_cursor += trans_height + 16
-
-                # Separator between segments
-                new_page.draw_line(
-                    fitz.Point(margin + 30, y_cursor),
-                    fitz.Point(page_width - margin - 30, y_cursor),
-                    color=(0.82, 0.82, 0.82),
-                    width=0.4,
-                )
-                y_cursor += 16
 
     else:
         # Standard text-layer PDF rebuild
@@ -697,7 +747,7 @@ async def run_translation(job_id: str, target_language: str, tone: str):
             translated_path = str(UPLOAD_DIR / f"{job_id}_translated.{file_type}")
 
             if file_type == "pdf" and is_ocr:
-                # For OCR PDFs, build translations dict with bbox, page, and original text
+                # For OCR PDFs, build translations dict with bbox, page, lines, and original text
                 translations = {}
                 for s in job["segments"]:
                     if s.get("translated") and s.get("ocr_bbox"):
@@ -706,6 +756,7 @@ async def run_translation(job_id: str, target_language: str, tone: str):
                             "bbox": s["ocr_bbox"],
                             "page": s["slide_num"] - 1,  # 0-indexed
                             "original": s["original"],
+                            "lines": s.get("ocr_lines", []),
                         }
                 rebuild_pdf(original_path, translated_path, translations, is_ocr=True)
             else:
@@ -926,6 +977,7 @@ async def download_translated(job_id: str):
                         "bbox": s["ocr_bbox"],
                         "page": s["slide_num"] - 1,
                         "original": s["original"],
+                        "lines": s.get("ocr_lines", []),
                     }
             rebuild_pdf(original_path, translated_path, translations, is_ocr=True)
         else:
