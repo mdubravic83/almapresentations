@@ -358,39 +358,147 @@ def rebuild_pdf(original_path: str, output_path: str, translations: dict, is_ocr
     """Rebuild PDF by overlaying translated text on original blocks."""
     doc = fitz.open(original_path)
 
+    # Use Liberation Sans for Unicode support (Croatian, etc.)
+    FONT_PATH = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+    FONT_BOLD_PATH = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+    FONT_NAME = "libsans"
+    FONT_BOLD_NAME = "libsansbold"
+
     if is_ocr:
-        # For OCR-based PDFs, we don't have a text layer to reference.
-        # We just write translated text over the original image at the stored bbox positions.
-        # The caller must pass translation data that includes bbox info.
-        # translations dict: {idx: {"text": translated_text, "bbox": [x0, y0, x1, y1], "page": page_num}}
+        # For OCR-based (image) PDFs: preserve original pages intact,
+        # add a clean translation page after each original page.
+
+        # Group translations by page
+        page_translations = {}
         for idx_key, tdata in translations.items():
             if not isinstance(tdata, dict):
                 continue
             page_idx = tdata.get("page", 0)
-            if page_idx >= len(doc):
-                continue
-            page = doc[page_idx]
-            bbox = tdata.get("bbox")
-            translated = tdata.get("text", "")
-            if not bbox or not translated:
-                continue
+            if page_idx not in page_translations:
+                page_translations[page_idx] = []
+            page_translations[page_idx].append(tdata)
 
-            rect = fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
-            # Cover original text with white rectangle
-            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
-            # Calculate font size to fit
-            rect_height = rect.height
-            font_size = min(rect_height * 0.7, 14)
-            font_size = max(font_size, 6)
-            # Insert translated text
-            page.insert_textbox(
-                rect,
-                translated,
-                fontsize=font_size,
-                fontname="helv",
-                color=(0, 0, 0),
+        # Process pages in reverse order so inserting doesn't shift indices
+        for page_idx in sorted(page_translations.keys(), reverse=True):
+            segments = page_translations[page_idx]
+            orig_page = doc[page_idx]
+            page_width = orig_page.rect.width
+            page_height = orig_page.rect.height
+
+            # Insert a new translation page right after the original
+            new_page = doc.new_page(pno=page_idx + 1, width=page_width, height=page_height)
+
+            # Light background
+            new_page.draw_rect(new_page.rect, color=None, fill=(0.98, 0.98, 0.97))
+
+            margin = 50
+            y_cursor = margin
+
+            # Header
+            header_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + 30)
+            new_page.insert_textbox(
+                header_rect,
+                f"TRANSLATION - Page {page_idx + 1}",
+                fontsize=18,
+                fontname=FONT_BOLD_NAME,
+                fontfile=FONT_BOLD_PATH,
+                color=(0.15, 0.15, 0.15),
                 align=0,
             )
+            y_cursor += 38
+
+            # Separator line
+            new_page.draw_line(
+                fitz.Point(margin, y_cursor),
+                fitz.Point(page_width - margin, y_cursor),
+                color=(0.6, 0.6, 0.6),
+                width=0.8,
+            )
+            y_cursor += 20
+
+            # Add each translated segment
+            for seg in segments:
+                original = seg.get("original", "")
+                translated = seg.get("text", "")
+                if not translated:
+                    continue
+
+                available_height = page_height - y_cursor - margin
+                if available_height < 100:
+                    new_page = doc.new_page(pno=-1, width=page_width, height=page_height)
+                    new_page.draw_rect(new_page.rect, color=None, fill=(0.98, 0.98, 0.97))
+                    y_cursor = margin
+
+                # Original text label
+                label_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + 16)
+                new_page.insert_textbox(
+                    label_rect,
+                    "ORIGINAL:",
+                    fontsize=8,
+                    fontname=FONT_BOLD_NAME,
+                    fontfile=FONT_BOLD_PATH,
+                    color=(0.45, 0.45, 0.45),
+                    align=0,
+                )
+                y_cursor += 17
+
+                # Original text
+                orig_display = original[:400]
+                chars_per_line = max(1, int((page_width - 2 * margin) / 6))
+                est_lines = max(1, (len(orig_display) // chars_per_line) + 1)
+                orig_height = max(30, est_lines * 16)
+
+                orig_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + orig_height)
+                new_page.insert_textbox(
+                    orig_rect,
+                    orig_display,
+                    fontsize=10,
+                    fontname=FONT_NAME,
+                    fontfile=FONT_PATH,
+                    color=(0.4, 0.4, 0.4),
+                    align=0,
+                )
+                y_cursor += orig_height + 8
+
+                # Translated text label
+                label_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + 16)
+                new_page.insert_textbox(
+                    label_rect,
+                    "TRANSLATED:",
+                    fontsize=8,
+                    fontname=FONT_BOLD_NAME,
+                    fontfile=FONT_BOLD_PATH,
+                    color=(0.05, 0.4, 0.25),
+                    align=0,
+                )
+                y_cursor += 17
+
+                # Translated text
+                trans_display = translated[:400]
+                est_lines = max(1, (len(trans_display) // chars_per_line) + 1)
+                trans_height = max(30, est_lines * 18)
+
+                trans_rect = fitz.Rect(margin, y_cursor, page_width - margin, y_cursor + trans_height)
+                new_page.insert_textbox(
+                    trans_rect,
+                    trans_display,
+                    fontsize=12,
+                    fontname=FONT_BOLD_NAME,
+                    fontfile=FONT_BOLD_PATH,
+                    color=(0.05, 0.05, 0.05),
+                    align=0,
+                )
+                y_cursor += trans_height + 16
+
+                # Separator between segments
+                new_page.draw_line(
+                    fitz.Point(margin + 30, y_cursor),
+                    fitz.Point(page_width - margin - 30, y_cursor),
+                    color=(0.82, 0.82, 0.82),
+                    width=0.4,
+                )
+                y_cursor += 16
+
     else:
         # Standard text-layer PDF rebuild
         idx = 0
@@ -411,7 +519,8 @@ def rebuild_pdf(original_path: str, output_path: str, translations: dict, is_ocr
                                 rect,
                                 translated,
                                 fontsize=font_size,
-                                fontname="helv",
+                                fontname=FONT_NAME,
+                                fontfile=FONT_PATH,
                                 color=(0, 0, 0),
                                 align=0,
                             )
@@ -588,7 +697,7 @@ async def run_translation(job_id: str, target_language: str, tone: str):
             translated_path = str(UPLOAD_DIR / f"{job_id}_translated.{file_type}")
 
             if file_type == "pdf" and is_ocr:
-                # For OCR PDFs, build translations dict with bbox and page info
+                # For OCR PDFs, build translations dict with bbox, page, and original text
                 translations = {}
                 for s in job["segments"]:
                     if s.get("translated") and s.get("ocr_bbox"):
@@ -596,6 +705,7 @@ async def run_translation(job_id: str, target_language: str, tone: str):
                             "text": s["translated"],
                             "bbox": s["ocr_bbox"],
                             "page": s["slide_num"] - 1,  # 0-indexed
+                            "original": s["original"],
                         }
                 rebuild_pdf(original_path, translated_path, translations, is_ocr=True)
             else:
@@ -815,6 +925,7 @@ async def download_translated(job_id: str):
                         "text": s["translated"],
                         "bbox": s["ocr_bbox"],
                         "page": s["slide_num"] - 1,
+                        "original": s["original"],
                     }
             rebuild_pdf(original_path, translated_path, translations, is_ocr=True)
         else:
