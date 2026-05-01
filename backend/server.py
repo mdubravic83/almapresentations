@@ -20,6 +20,9 @@ from pptx import Presentation as PptxPresentation
 from docx import Document as DocxDocument
 import fitz  # PyMuPDF
 from openai import AsyncOpenAI
+from PIL import Image
+import pytesseract
+import io
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -219,7 +222,10 @@ def rebuild_docx(original_path: str, output_path: str, translations: dict):
 # ════════════════════════════════════════
 # PDF extraction & rebuild
 # ════════════════════════════════════════
-def extract_pdf_segments(path: str) -> list:
+def extract_pdf_segments(path: str) -> tuple:
+    """Extract text segments from PDF. Returns (segments, is_ocr).
+    Falls back to OCR if no text layer is found.
+    """
     doc = fitz.open(path)
     segments = []
     idx = 0
@@ -239,38 +245,178 @@ def extract_pdf_segments(path: str) -> list:
                     })
                     idx += 1
     doc.close()
+
+    # If no text found, fall back to OCR
+    if not segments:
+        logger.info(f"No text layer found in PDF, falling back to OCR: {path}")
+        segments = extract_pdf_segments_ocr(path)
+        return segments, True
+
+    return segments, False
+
+
+def extract_pdf_segments_ocr(path: str) -> list:
+    """Extract text segments from image-based PDF using OCR (Tesseract).
+    Returns segments with bounding box data for rebuilding.
+    """
+    doc = fitz.open(path)
+    segments = []
+    idx = 0
+    render_dpi = 300
+
+    for page_num, page in enumerate(doc):
+        # Render page as high-res image for OCR
+        pix = page.get_pixmap(dpi=render_dpi)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+        # OCR with bounding box data
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+
+        # Group words into lines
+        lines = {}
+        for i in range(len(data['text'])):
+            text = data['text'][i].strip()
+            if text and data['conf'][i] > 30:
+                block_num = data['block_num'][i]
+                line_num = data['line_num'][i]
+                key = (block_num, line_num)
+                if key not in lines:
+                    lines[key] = {
+                        'words': [],
+                        'left': data['left'][i],
+                        'top': data['top'][i],
+                        'right': data['left'][i] + data['width'][i],
+                        'bottom': data['top'][i] + data['height'][i],
+                    }
+                lines[key]['words'].append(text)
+                lines[key]['left'] = min(lines[key]['left'], data['left'][i])
+                lines[key]['top'] = min(lines[key]['top'], data['top'][i])
+                lines[key]['right'] = max(lines[key]['right'], data['left'][i] + data['width'][i])
+                lines[key]['bottom'] = max(lines[key]['bottom'], data['top'][i] + data['height'][i])
+
+        # Group lines into blocks
+        blocks = {}
+        for (block_num, line_num), line_data in sorted(lines.items()):
+            if block_num not in blocks:
+                blocks[block_num] = {
+                    'text': '',
+                    'left': line_data['left'],
+                    'top': line_data['top'],
+                    'right': line_data['right'],
+                    'bottom': line_data['bottom'],
+                }
+            line_text = ' '.join(line_data['words'])
+            if blocks[block_num]['text']:
+                blocks[block_num]['text'] += ' ' + line_text
+            else:
+                blocks[block_num]['text'] = line_text
+            blocks[block_num]['left'] = min(blocks[block_num]['left'], line_data['left'])
+            blocks[block_num]['top'] = min(blocks[block_num]['top'], line_data['top'])
+            blocks[block_num]['right'] = max(blocks[block_num]['right'], line_data['right'])
+            blocks[block_num]['bottom'] = max(blocks[block_num]['bottom'], line_data['bottom'])
+
+        # Convert pixel coords to PDF points (72 DPI)
+        scale = 72.0 / render_dpi
+        page_rect = page.rect
+
+        for block_num, b in sorted(blocks.items()):
+            text = b['text'].strip()
+            if not text or len(text) < 2:
+                continue
+            # Skip if it looks like OCR noise
+            if text.startswith("http"):
+                continue
+
+            # Convert pixel coordinates to PDF point coordinates
+            x0 = b['left'] * scale
+            y0 = b['top'] * scale
+            x1 = b['right'] * scale
+            y1 = b['bottom'] * scale
+
+            # Clamp to page bounds
+            x0 = max(0, min(x0, page_rect.width))
+            y0 = max(0, min(y0, page_rect.height))
+            x1 = max(0, min(x1, page_rect.width))
+            y1 = max(0, min(y1, page_rect.height))
+
+            segments.append({
+                "idx": idx,
+                "slide_num": page_num + 1,
+                "original": text,
+                "translated": None,
+                "translatable": True,
+                "ocr_bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)],
+            })
+            idx += 1
+
+    doc.close()
+    logger.info(f"OCR extracted {len(segments)} text segments")
     return segments
 
 
-def rebuild_pdf(original_path: str, output_path: str, translations: dict):
+def rebuild_pdf(original_path: str, output_path: str, translations: dict, is_ocr: bool = False):
     """Rebuild PDF by overlaying translated text on original blocks."""
     doc = fitz.open(original_path)
-    idx = 0
-    for page in doc:
-        blocks = page.get_text("blocks")
-        for block in blocks:
-            if block[6] == 0:
-                text = block[4].strip()
-                if text and not text.startswith("http"):
-                    translated = translations.get(idx)
-                    if translated:
-                        rect = fitz.Rect(block[0], block[1], block[2], block[3])
-                        # Cover original text with white rectangle
-                        page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
-                        # Calculate font size to fit
-                        rect_height = rect.height
-                        font_size = min(rect_height * 0.8, 11)
-                        font_size = max(font_size, 6)
-                        # Insert translated text
-                        page.insert_textbox(
-                            rect,
-                            translated,
-                            fontsize=font_size,
-                            fontname="helv",
-                            color=(0, 0, 0),
-                            align=0,
-                        )
-                    idx += 1
+
+    if is_ocr:
+        # For OCR-based PDFs, we don't have a text layer to reference.
+        # We just write translated text over the original image at the stored bbox positions.
+        # The caller must pass translation data that includes bbox info.
+        # translations dict: {idx: {"text": translated_text, "bbox": [x0, y0, x1, y1], "page": page_num}}
+        for idx_key, tdata in translations.items():
+            if not isinstance(tdata, dict):
+                continue
+            page_idx = tdata.get("page", 0)
+            if page_idx >= len(doc):
+                continue
+            page = doc[page_idx]
+            bbox = tdata.get("bbox")
+            translated = tdata.get("text", "")
+            if not bbox or not translated:
+                continue
+
+            rect = fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
+            # Cover original text with white rectangle
+            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
+            # Calculate font size to fit
+            rect_height = rect.height
+            font_size = min(rect_height * 0.7, 14)
+            font_size = max(font_size, 6)
+            # Insert translated text
+            page.insert_textbox(
+                rect,
+                translated,
+                fontsize=font_size,
+                fontname="helv",
+                color=(0, 0, 0),
+                align=0,
+            )
+    else:
+        # Standard text-layer PDF rebuild
+        idx = 0
+        for page in doc:
+            blocks = page.get_text("blocks")
+            for block in blocks:
+                if block[6] == 0:
+                    text = block[4].strip()
+                    if text and not text.startswith("http"):
+                        translated = translations.get(idx)
+                        if translated:
+                            rect = fitz.Rect(block[0], block[1], block[2], block[3])
+                            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
+                            rect_height = rect.height
+                            font_size = min(rect_height * 0.8, 11)
+                            font_size = max(font_size, 6)
+                            page.insert_textbox(
+                                rect,
+                                translated,
+                                fontsize=font_size,
+                                fontname="helv",
+                                color=(0, 0, 0),
+                                align=0,
+                            )
+                        idx += 1
+
     doc.save(output_path)
     doc.close()
 
@@ -435,21 +581,36 @@ async def run_translation(job_id: str, target_language: str, tone: str):
         # Generate translated file and its preview images
         try:
             job = await db.translation_jobs.find_one({"id": job_id}, {"_id": 0})
-            translations = {}
-            for s in job["segments"]:
-                if s.get("translated"):
-                    translations[s["idx"]] = s["translated"]
+            is_ocr = job.get("is_ocr", False)
 
             file_type = job["file_type"]
             original_path = job["file_path"]
             translated_path = str(UPLOAD_DIR / f"{job_id}_translated.{file_type}")
 
-            if file_type == "pptx":
-                rebuild_pptx(original_path, translated_path, translations)
-            elif file_type == "docx":
-                rebuild_docx(original_path, translated_path, translations)
-            elif file_type == "pdf":
-                rebuild_pdf(original_path, translated_path, translations)
+            if file_type == "pdf" and is_ocr:
+                # For OCR PDFs, build translations dict with bbox and page info
+                translations = {}
+                for s in job["segments"]:
+                    if s.get("translated") and s.get("ocr_bbox"):
+                        translations[s["idx"]] = {
+                            "text": s["translated"],
+                            "bbox": s["ocr_bbox"],
+                            "page": s["slide_num"] - 1,  # 0-indexed
+                        }
+                rebuild_pdf(original_path, translated_path, translations, is_ocr=True)
+            else:
+                # Standard rebuild for text-based files
+                translations = {}
+                for s in job["segments"]:
+                    if s.get("translated"):
+                        translations[s["idx"]] = s["translated"]
+
+                if file_type == "pptx":
+                    rebuild_pptx(original_path, translated_path, translations)
+                elif file_type == "docx":
+                    rebuild_docx(original_path, translated_path, translations)
+                elif file_type == "pdf":
+                    rebuild_pdf(original_path, translated_path, translations, is_ocr=False)
 
             # Generate visual preview images for translated file
             translated_images = generate_slide_images(translated_path, file_type, job_id, "translated")
@@ -497,12 +658,13 @@ async def upload_file(file: UploadFile = File(...)):
         f.write(content)
 
     try:
+        is_ocr = False
         if file_type == "pptx":
             segments = extract_pptx_segments(str(file_path))
         elif file_type == "docx":
             segments = extract_docx_segments(str(file_path))
         elif file_type == "pdf":
-            segments = extract_pdf_segments(str(file_path))
+            segments, is_ocr = extract_pdf_segments(str(file_path))
         else:
             raise HTTPException(400, "Unsupported file type")
     except HTTPException:
@@ -528,6 +690,7 @@ async def upload_file(file: UploadFile = File(...)):
         "error_message": None,
         "original_images": original_image_paths,
         "translated_images": [],
+        "is_ocr": is_ocr,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.translation_jobs.insert_one(job_doc)
@@ -641,18 +804,31 @@ async def download_translated(job_id: str):
         if not Path(original_path).exists():
             raise HTTPException(404, "Original file not found")
 
-        translations = {}
-        for s in job["segments"]:
-            if s.get("translated"):
-                translations[s["idx"]] = s["translated"]
-
+        is_ocr = job.get("is_ocr", False)
         translated_path = str(UPLOAD_DIR / f"{job_id}_translated.{file_type}")
-        if file_type == "pptx":
-            rebuild_pptx(original_path, translated_path, translations)
-        elif file_type == "docx":
-            rebuild_docx(original_path, translated_path, translations)
-        elif file_type == "pdf":
-            rebuild_pdf(original_path, translated_path, translations)
+
+        if file_type == "pdf" and is_ocr:
+            translations = {}
+            for s in job["segments"]:
+                if s.get("translated") and s.get("ocr_bbox"):
+                    translations[s["idx"]] = {
+                        "text": s["translated"],
+                        "bbox": s["ocr_bbox"],
+                        "page": s["slide_num"] - 1,
+                    }
+            rebuild_pdf(original_path, translated_path, translations, is_ocr=True)
+        else:
+            translations = {}
+            for s in job["segments"]:
+                if s.get("translated"):
+                    translations[s["idx"]] = s["translated"]
+
+            if file_type == "pptx":
+                rebuild_pptx(original_path, translated_path, translations)
+            elif file_type == "docx":
+                rebuild_docx(original_path, translated_path, translations)
+            elif file_type == "pdf":
+                rebuild_pdf(original_path, translated_path, translations, is_ocr=False)
 
     original_name = Path(job["filename"]).stem
     lang = job.get("target_language", "translated")
