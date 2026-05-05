@@ -620,6 +620,7 @@ export default function PdfEditor({ onBack }) {
                         className={`color-swatch ${whiteoutColor === c ? "active" : ""}`}
                         style={{ backgroundColor: c }}
                         onClick={() => { setWhiteoutColor(c); setShowWhiteoutColorPicker(false); }}
+                        data-testid={`whiteout-swatch-${c.replace('#','')}`}
                       />
                     ))}
                   </div>

@@ -1049,6 +1049,11 @@ async def editor_upload(file: UploadFile = File(...)):
 
     file_path = job_dir / file.filename
     content = await file.read()
+
+    # File size limit (50MB)
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File size exceeds 50MB limit")
+
     with open(file_path, "wb") as f:
         f.write(content)
 
