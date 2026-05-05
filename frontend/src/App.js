@@ -4,8 +4,9 @@ import axios from "axios";
 import {
   Upload, FileText, Languages, Download, ChevronDown, RotateCcw,
   AlertCircle, Check, ArrowRight, Mic, GraduationCap, Briefcase,
-  X, ChevronLeft, ChevronRight, Eye, AlignLeft, FileType,
+  X, ChevronLeft, ChevronRight, Eye, AlignLeft, FileType, PenTool,
 } from "lucide-react";
+import PdfEditor from "./PdfEditor";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -39,6 +40,7 @@ const TONES = [
 const FILE_TYPE_LABELS = { pptx: "PowerPoint", docx: "Word", pdf: "PDF" };
 
 function App() {
+  const [appMode, setAppMode] = useState("translate"); // "translate" or "editor"
   const [step, setStep] = useState("upload");
   const [file, setFile] = useState(null);
   const [jobId, setJobId] = useState(null);
@@ -206,6 +208,10 @@ function App() {
 
   return (
     <div className="app-wrapper">
+      {appMode === "editor" ? (
+        <PdfEditor onBack={() => setAppMode("translate")} />
+      ) : (
+      <>
       <header className="app-header" data-testid="app-header">
         <div className="header-inner">
           <div className="header-brand">
@@ -213,6 +219,13 @@ function App() {
             <span className="header-title">SlideTranslate</span>
           </div>
           <div className="header-right">
+            <button
+              className="header-editor-btn"
+              onClick={() => setAppMode("editor")}
+              data-testid="open-editor-btn"
+            >
+              <PenTool size={15} /> PDF Editor
+            </button>
             <span className="header-formats">
               <FileType size={14} /> .pptx .docx .pdf
             </span>
@@ -572,6 +585,8 @@ function App() {
         <span className="footer-sep">/</span>
         <span>Powered by OpenAI o4-mini</span>
       </footer>
+      </>
+      )}
     </div>
   );
 }

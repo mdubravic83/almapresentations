@@ -8,7 +8,7 @@ import requests
 import time
 import fitz  # PyMuPDF
 
-BACKEND_URL = "https://slide-translator-app.preview.emergentagent.com"
+BACKEND_URL = "https://doc-translate-ocr.preview.emergentagent.com"
 API_BASE = f"{BACKEND_URL}/api"
 
 def create_test_pdf():

@@ -1010,6 +1010,199 @@ async def download_translated(job_id: str):
     )
 
 
+# ════════════════════════════════════════
+# PDF Editor endpoints
+# ════════════════════════════════════════
+
+EDITOR_DIR = Path("/tmp/pdf_editor")
+EDITOR_DIR.mkdir(exist_ok=True)
+
+
+class EditorEditItem(BaseModel):
+    type: str  # "text" or "whiteout"
+    page: int
+    x: float
+    y: float
+    width: float
+    height: float
+    text: Optional[str] = None
+    fontSize: Optional[float] = 16
+    fontColor: Optional[str] = "#000000"
+    bold: Optional[bool] = False
+    italic: Optional[bool] = False
+    backgroundColor: Optional[str] = "#ffffff"
+
+
+class EditorSaveRequest(BaseModel):
+    edits: List[EditorEditItem]
+
+
+@api_router.post("/editor/upload")
+async def editor_upload(file: UploadFile = File(...)):
+    ext = Path(file.filename).suffix.lower()
+    if ext != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF files are supported in the editor")
+
+    job_id = str(uuid.uuid4())
+    job_dir = EDITOR_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = job_dir / file.filename
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Open PDF and get page count
+    doc = fitz.open(str(file_path))
+    page_count = len(doc)
+
+    # Render each page as PNG
+    pages_dir = job_dir / "pages"
+    pages_dir.mkdir(exist_ok=True)
+    for i in range(page_count):
+        page = doc[i]
+        # Render at 2x for quality
+        mat = fitz.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=mat)
+        pix.save(str(pages_dir / f"page_{i}.png"))
+
+    # Store page dimensions for coordinate mapping
+    page_dims = []
+    for i in range(page_count):
+        page = doc[i]
+        page_dims.append({"width": page.rect.width, "height": page.rect.height})
+
+    doc.close()
+
+    # Save metadata
+    meta = {
+        "job_id": job_id,
+        "filename": file.filename,
+        "file_path": str(file_path),
+        "page_count": page_count,
+        "page_dims": page_dims,
+    }
+    with open(job_dir / "meta.json", "w") as f:
+        json.dump(meta, f)
+
+    return {
+        "job_id": job_id,
+        "filename": file.filename,
+        "page_count": page_count,
+        "page_dims": page_dims,
+    }
+
+
+@api_router.get("/editor/page/{job_id}/{page_num}")
+async def editor_get_page(job_id: str, page_num: int):
+    job_dir = EDITOR_DIR / job_id
+    page_path = job_dir / "pages" / f"page_{page_num}.png"
+    if not page_path.exists():
+        raise HTTPException(status_code=404, detail="Page not found")
+    return FileResponse(str(page_path), media_type="image/png")
+
+
+@api_router.post("/editor/save/{job_id}")
+async def editor_save(job_id: str, request: EditorSaveRequest):
+    job_dir = EDITOR_DIR / job_id
+    meta_path = job_dir / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Editor job not found")
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    doc = fitz.open(meta["file_path"])
+
+    for edit in request.edits:
+        if edit.page < 0 or edit.page >= len(doc):
+            continue
+        page = doc[edit.page]
+
+        if edit.type == "whiteout":
+            # Draw white rectangle to cover content
+            hex_color = edit.backgroundColor or "#ffffff"
+            r = int(hex_color[1:3], 16) / 255
+            g = int(hex_color[3:5], 16) / 255
+            b = int(hex_color[5:7], 16) / 255
+            rect = fitz.Rect(edit.x, edit.y, edit.x + edit.width, edit.y + edit.height)
+            page.draw_rect(rect, color=None, fill=(r, g, b))
+
+        elif edit.type == "text":
+            # Add text at position
+            hex_color = edit.fontColor or "#000000"
+            r = int(hex_color[1:3], 16) / 255
+            g = int(hex_color[3:5], 16) / 255
+            b = int(hex_color[5:7], 16) / 255
+
+            font_size = edit.fontSize or 16
+            text = edit.text or ""
+
+            # Use built-in font
+            fontname = "helv"
+            if edit.bold and edit.italic:
+                fontname = "hebi"
+            elif edit.bold:
+                fontname = "hebo"
+            elif edit.italic:
+                fontname = "heit"
+
+            # Insert text
+            text_point = fitz.Point(edit.x, edit.y + font_size)
+            page.insert_text(
+                text_point,
+                text,
+                fontsize=font_size,
+                fontname=fontname,
+                color=(r, g, b),
+            )
+
+    # Save edited PDF
+    output_path = job_dir / "edited.pdf"
+    doc.save(str(output_path))
+    doc.close()
+
+    # Re-render pages for preview
+    doc = fitz.open(str(output_path))
+    pages_dir = job_dir / "pages_edited"
+    pages_dir.mkdir(exist_ok=True)
+    for i in range(len(doc)):
+        page = doc[i]
+        mat = fitz.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=mat)
+        pix.save(str(pages_dir / f"page_{i}.png"))
+    doc.close()
+
+    return {"status": "saved", "download_url": f"/api/editor/download/{job_id}"}
+
+
+@api_router.get("/editor/page-edited/{job_id}/{page_num}")
+async def editor_get_page_edited(job_id: str, page_num: int):
+    job_dir = EDITOR_DIR / job_id
+    page_path = job_dir / "pages_edited" / f"page_{page_num}.png"
+    if not page_path.exists():
+        raise HTTPException(status_code=404, detail="Edited page not found")
+    return FileResponse(str(page_path), media_type="image/png")
+
+
+@api_router.get("/editor/download/{job_id}")
+async def editor_download(job_id: str):
+    job_dir = EDITOR_DIR / job_id
+    meta_path = job_dir / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Editor job not found")
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    output_path = job_dir / "edited.pdf"
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="No edits saved yet")
+
+    filename = meta["filename"].replace(".pdf", "_edited.pdf")
+    return FileResponse(str(output_path), media_type="application/pdf", filename=filename)
+
+
 app.include_router(api_router)
 
 app.add_middleware(

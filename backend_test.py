@@ -12,7 +12,7 @@ import io
 import sys
 
 # Backend URL from frontend/.env
-BACKEND_URL = "https://slide-translator-app.preview.emergentagent.com/api"
+BACKEND_URL = "https://doc-translate-ocr.preview.emergentagent.com/api"
 
 def create_image_based_pdf(output_path: str):
     """Create an image-based PDF (no text layer) for OCR testing."""
