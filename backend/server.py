@@ -1019,7 +1019,7 @@ EDITOR_DIR.mkdir(exist_ok=True)
 
 
 class EditorEditItem(BaseModel):
-    type: str  # "text" or "whiteout"
+    type: str  # "text", "whiteout", or "replace"
     page: int
     x: float
     y: float
@@ -1031,6 +1031,11 @@ class EditorEditItem(BaseModel):
     bold: Optional[bool] = False
     italic: Optional[bool] = False
     backgroundColor: Optional[str] = "#ffffff"
+    # For replace type - original bounding box to whiteout
+    origX: Optional[float] = None
+    origY: Optional[float] = None
+    origWidth: Optional[float] = None
+    origHeight: Optional[float] = None
 
 
 class EditorSaveRequest(BaseModel):
@@ -1107,6 +1112,64 @@ async def editor_get_page(job_id: str, page_num: int):
     return FileResponse(str(page_path), media_type="image/png")
 
 
+@api_router.get("/editor/text-blocks/{job_id}/{page_num}")
+async def editor_get_text_blocks(job_id: str, page_num: int):
+    """Extract text blocks with positions, font info for click-to-edit."""
+    job_dir = EDITOR_DIR / job_id
+    meta_path = job_dir / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Editor job not found")
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    doc = fitz.open(meta["file_path"])
+    if page_num >= len(doc):
+        doc.close()
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    page = doc[page_num]
+    page_dict = page.get_text("dict")
+    blocks = []
+
+    for block in page_dict.get("blocks", []):
+        if block.get("type") != 0:  # Only text blocks
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = span.get("text", "").strip()
+                if not text:
+                    continue
+                bbox = span.get("bbox", [0, 0, 0, 0])
+                font = span.get("font", "")
+                size = span.get("size", 12)
+                color_int = span.get("color", 0)
+                # Convert int color to hex
+                r = (color_int >> 16) & 0xFF
+                g = (color_int >> 8) & 0xFF
+                b = color_int & 0xFF
+                color_hex = f"#{r:02x}{g:02x}{b:02x}"
+                flags = span.get("flags", 0)
+                is_bold = bool(flags & 16)
+                is_italic = bool(flags & 2)
+
+                blocks.append({
+                    "text": text,
+                    "x": bbox[0],
+                    "y": bbox[1],
+                    "width": bbox[2] - bbox[0],
+                    "height": bbox[3] - bbox[1],
+                    "fontSize": size,
+                    "fontColor": color_hex,
+                    "fontName": font,
+                    "bold": is_bold,
+                    "italic": is_italic,
+                })
+
+    doc.close()
+    return {"blocks": blocks}
+
+
 @api_router.post("/editor/save/{job_id}")
 async def editor_save(job_id: str, request: EditorSaveRequest):
     job_dir = EDITOR_DIR / job_id
@@ -1154,6 +1217,44 @@ async def editor_save(job_id: str, request: EditorSaveRequest):
 
             # Insert text
             text_point = fitz.Point(edit.x, edit.y + font_size)
+            page.insert_text(
+                text_point,
+                text,
+                fontsize=font_size,
+                fontname=fontname,
+                color=(r, g, b),
+            )
+
+        elif edit.type == "replace":
+            # Whiteout original area then insert new text
+            # First: draw white rect over original text
+            orig_x = edit.origX if edit.origX is not None else edit.x
+            orig_y = edit.origY if edit.origY is not None else edit.y
+            orig_w = edit.origWidth if edit.origWidth is not None else edit.width
+            orig_h = edit.origHeight if edit.origHeight is not None else edit.height
+            rect = fitz.Rect(orig_x, orig_y, orig_x + orig_w, orig_y + orig_h)
+            # Use page background (white)
+            page.draw_rect(rect, color=None, fill=(1, 1, 1))
+
+            # Then: insert new text at same position
+            hex_color = edit.fontColor or "#000000"
+            r = int(hex_color[1:3], 16) / 255
+            g = int(hex_color[3:5], 16) / 255
+            b = int(hex_color[5:7], 16) / 255
+
+            font_size = edit.fontSize or 12
+            text = edit.text or ""
+
+            fontname = "helv"
+            if edit.bold and edit.italic:
+                fontname = "hebi"
+            elif edit.bold:
+                fontname = "hebo"
+            elif edit.italic:
+                fontname = "heit"
+
+            # Position text at original baseline
+            text_point = fitz.Point(orig_x, orig_y + font_size)
             page.insert_text(
                 text_point,
                 text,

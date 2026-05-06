@@ -4,13 +4,13 @@ import { Canvas, IText, Rect } from "fabric";
 import {
   Upload, Type, Square, ChevronLeft, ChevronRight,
   Download, Save, Undo2, Trash2, Bold, Italic,
-  ArrowLeft, FileText, Palette
+  ArrowLeft, FileText, Palette, MousePointer
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48];
+const FONT_SIZES = [8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48];
 const COLORS = ["#000000", "#333333", "#666666", "#ffffff", "#ff0000", "#0066cc", "#008800", "#ff6600", "#9900cc"];
 
 export default function PdfEditor({ onBack }) {
@@ -19,7 +19,7 @@ export default function PdfEditor({ onBack }) {
   const [pageDims, setPageDims] = useState([]);
   const [currentPage, setCurrentPage] = useState(0);
   const [activeTool, setActiveTool] = useState("select");
-  const [fontSize, setFontSize] = useState(16);
+  const [fontSize, setFontSize] = useState(14);
   const [fontColor, setFontColor] = useState("#000000");
   const [isBold, setIsBold] = useState(false);
   const [isItalic, setIsItalic] = useState(false);
@@ -31,20 +31,23 @@ export default function PdfEditor({ onBack }) {
   const [error, setError] = useState(null);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showWhiteoutColorPicker, setShowWhiteoutColorPicker] = useState(false);
+  const [canvasScale, setCanvasScale] = useState(1);
 
   const canvasRef = useRef(null);
   const fabricRef = useRef(null);
   const containerRef = useRef(null);
   const fileInputRef = useRef(null);
   const pageEditsRef = useRef({});
+  const textBlocksRef = useRef({});
+  const modifiedBlocksRef = useRef({});
   const isDrawingRef = useRef(false);
   const drawStartRef = useRef(null);
   const tempRectRef = useRef(null);
   const activeToolRef = useRef(activeTool);
   const fontSettingsRef = useRef({ fontSize, fontColor, isBold, isItalic });
   const whiteoutColorRef = useRef(whiteoutColor);
+  const scaleRef = useRef(1);
 
-  // Keep refs in sync with state
   useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   useEffect(() => { fontSettingsRef.current = { fontSize, fontColor, isBold, isItalic }; }, [fontSize, fontColor, isBold, isItalic]);
   useEffect(() => { whiteoutColorRef.current = whiteoutColor; }, [whiteoutColor]);
@@ -59,7 +62,7 @@ export default function PdfEditor({ onBack }) {
       preserveObjectStacking: true,
     });
 
-    // Mouse down handler
+    // Mouse down handler for drawing and text
     canvas.on("mouse:down", (opt) => {
       const tool = activeToolRef.current;
 
@@ -105,6 +108,7 @@ export default function PdfEditor({ onBack }) {
         canvas.add(textbox);
         canvas.setActiveObject(textbox);
         textbox.enterEditing();
+        textbox.selectAll();
         canvas.renderAll();
       }
     });
@@ -113,12 +117,10 @@ export default function PdfEditor({ onBack }) {
       if (!isDrawingRef.current || !tempRectRef.current) return;
       const pointer = canvas.getViewportPoint(opt.e);
       const start = drawStartRef.current;
-
       const left = Math.min(start.x, pointer.x);
       const top = Math.min(start.y, pointer.y);
       const width = Math.abs(pointer.x - start.x);
       const height = Math.abs(pointer.y - start.y);
-
       tempRectRef.current.set({ left, top, width, height });
       canvas.renderAll();
     });
@@ -126,7 +128,7 @@ export default function PdfEditor({ onBack }) {
     canvas.on("mouse:up", () => {
       if (!isDrawingRef.current) return;
       isDrawingRef.current = false;
-      if (tempRectRef.current && tempRectRef.current.width < 5 && tempRectRef.current.height < 5) {
+      if (tempRectRef.current && tempRectRef.current.width < 3 && tempRectRef.current.height < 3) {
         canvas.remove(tempRectRef.current);
       }
       tempRectRef.current = null;
@@ -137,7 +139,86 @@ export default function PdfEditor({ onBack }) {
     return canvas;
   }, []);
 
-  // Load page dimensions for canvas sizing
+  // Fetch text blocks for current page and create clickable areas
+  const loadTextBlocks = useCallback(async (pageNum, scale) => {
+    if (!jobId || !fabricRef.current) return;
+
+    try {
+      const res = await axios.get(`${API}/editor/text-blocks/${jobId}/${pageNum}`);
+      const blocks = res.data.blocks;
+      textBlocksRef.current[pageNum] = blocks;
+
+      const canvas = fabricRef.current;
+
+      // Create invisible clickable regions for each text block
+      blocks.forEach((block, idx) => {
+        const rect = new Rect({
+          left: block.x * scale,
+          top: block.y * scale,
+          width: block.width * scale,
+          height: block.height * scale,
+          fill: "transparent",
+          stroke: "transparent",
+          strokeWidth: 0,
+          selectable: false,
+          evented: true,
+          hoverCursor: "text",
+          opacity: 0,
+        });
+        rect.textBlockIdx = idx;
+        rect.textBlockData = block;
+        rect.editType = "textBlockHitArea";
+
+        // On double-click, enter edit mode for this text block
+        rect.on("mousedblclick", () => {
+          activateTextBlockEditing(block, idx, scale, canvas);
+        });
+
+        canvas.add(rect);
+      });
+      canvas.renderAll();
+    } catch (err) {
+      console.error("Failed to load text blocks:", err);
+    }
+  }, [jobId]);
+
+  // Activate editing for a specific text block
+  const activateTextBlockEditing = (block, idx, scale, canvas) => {
+    // Remove the hit area rect for this block
+    const hitAreas = canvas.getObjects().filter(
+      obj => obj.editType === "textBlockHitArea" && obj.textBlockIdx === idx
+    );
+    hitAreas.forEach(h => canvas.remove(h));
+
+    // Create editable IText at the block's position
+    const textObj = new IText(block.text, {
+      left: block.x * scale,
+      top: block.y * scale,
+      fontSize: block.fontSize * scale,
+      fill: block.fontColor,
+      fontWeight: block.bold ? "bold" : "normal",
+      fontStyle: block.italic ? "italic" : "normal",
+      fontFamily: "Helvetica",
+      editable: true,
+      selectable: true,
+      backgroundColor: "rgba(200, 220, 255, 0.3)",
+    });
+    textObj.editType = "replaceText";
+    textObj.originalBlock = block;
+    textObj.blockIdx = idx;
+    textObj.editFontSize = block.fontSize;
+    textObj.editFontColor = block.fontColor;
+    textObj.editBold = block.bold;
+    textObj.editItalic = block.italic;
+
+    canvas.add(textObj);
+    canvas.setActiveObject(textObj);
+    textObj.enterEditing();
+    textObj.selectAll();
+    canvas.renderAll();
+  };
+
+  // Load page
   const loadPage = useCallback(async (pageNum) => {
     if (!jobId || !fabricRef.current) return;
     const canvas = fabricRef.current;
@@ -146,7 +227,6 @@ export default function PdfEditor({ onBack }) {
     const imgEl = document.getElementById("editor-bg-image");
     if (!imgEl) return;
 
-    // Load image to get dimensions
     await new Promise((resolve) => {
       imgEl.onload = resolve;
       imgEl.src = imgUrl;
@@ -156,37 +236,52 @@ export default function PdfEditor({ onBack }) {
     if (!container) return;
 
     const maxWidth = Math.min(container.clientWidth - 48, 900);
-    const scale = maxWidth / imgEl.naturalWidth;
-    const canvasWidth = Math.round(imgEl.naturalWidth * scale);
+    const pageDim = pageDims[pageNum];
+    // The image is rendered at 2x, so natural dimensions are PDF*2
+    const imgNaturalW = imgEl.naturalWidth;
+    const scale = maxWidth / imgNaturalW;
+    const canvasWidth = Math.round(imgNaturalW * scale);
     const canvasHeight = Math.round(imgEl.naturalHeight * scale);
 
-    // Size the image element
+    // The PDF->canvas scale = canvasWidth / pdfWidth = (imgNaturalW * scale) / pdfWidth
+    // Since imgNaturalW = pdfWidth * 2 (rendered at 2x), pdfToCanvas = 2 * scale
+    const pdfToCanvas = (imgNaturalW / pageDim.width) * scale;
+    scaleRef.current = pdfToCanvas;
+    setCanvasScale(pdfToCanvas);
+
     imgEl.style.width = canvasWidth + "px";
     imgEl.style.height = canvasHeight + "px";
 
-    // Size the canvas overlay to match
     canvas.setDimensions({ width: canvasWidth, height: canvasHeight });
     canvas.clear();
     canvas.renderAll();
 
-    // Restore edits for this page
+    // Restore user edits for this page
     restorePageState(pageNum);
-  }, [jobId]);
 
-  // Save current canvas objects for a page
+    // Load text blocks for click-to-edit
+    await loadTextBlocks(pageNum, pdfToCanvas);
+  }, [jobId, pageDims, loadTextBlocks]);
+
+  // Save current canvas objects for a page (only user edits, not hit areas)
   const savePageState = useCallback((pageNum) => {
     if (!fabricRef.current) return;
     const canvas = fabricRef.current;
-    const objects = canvas.getObjects().filter(obj => obj.editType).map(obj => {
-      const json = obj.toJSON();
-      json.editType = obj.editType;
-      json.editFontSize = obj.editFontSize;
-      json.editFontColor = obj.editFontColor;
-      json.editBold = obj.editBold;
-      json.editItalic = obj.editItalic;
-      json.editWhiteoutColor = obj.editWhiteoutColor;
-      return json;
-    });
+    const objects = canvas.getObjects()
+      .filter(obj => obj.editType && obj.editType !== "textBlockHitArea")
+      .map(obj => {
+        const json = obj.toJSON();
+        json.editType = obj.editType;
+        json.editFontSize = obj.editFontSize;
+        json.editFontColor = obj.editFontColor;
+        json.editBold = obj.editBold;
+        json.editItalic = obj.editItalic;
+        json.editWhiteoutColor = obj.editWhiteoutColor;
+        if (obj.originalBlock) {
+          json.originalBlock = obj.originalBlock;
+        }
+        return json;
+      });
     pageEditsRef.current[pageNum] = objects;
   }, []);
 
@@ -214,7 +309,7 @@ export default function PdfEditor({ onBack }) {
         });
         obj.editType = "whiteout";
         obj.editWhiteoutColor = objData.editWhiteoutColor || objData.fill;
-      } else if (objData.editType === "text") {
+      } else if (objData.editType === "text" || objData.editType === "replaceText") {
         obj = new IText(objData.text || "Tekst", {
           left: objData.left,
           top: objData.top,
@@ -228,11 +323,14 @@ export default function PdfEditor({ onBack }) {
           editable: true,
           selectable: true,
         });
-        obj.editType = "text";
+        obj.editType = objData.editType;
         obj.editFontSize = objData.editFontSize;
         obj.editFontColor = objData.editFontColor;
         obj.editBold = objData.editBold;
         obj.editItalic = objData.editItalic;
+        if (objData.originalBlock) {
+          obj.originalBlock = objData.originalBlock;
+        }
       }
       if (obj) canvas.add(obj);
     });
@@ -251,7 +349,7 @@ export default function PdfEditor({ onBack }) {
       canvas.hoverCursor = "crosshair";
     } else {
       canvas.defaultCursor = "default";
-      canvas.hoverCursor = "move";
+      canvas.hoverCursor = "default";
     }
   }, [activeTool]);
 
@@ -280,6 +378,8 @@ export default function PdfEditor({ onBack }) {
       setFilename(res.data.filename);
       setCurrentPage(0);
       pageEditsRef.current = {};
+      textBlocksRef.current = {};
+      modifiedBlocksRef.current = {};
     } catch (e) {
       setError(e.response?.data?.detail || "Upload failed");
     } finally {
@@ -296,10 +396,10 @@ export default function PdfEditor({ onBack }) {
 
   // Load page when canvas is ready or page changes
   useEffect(() => {
-    if (jobId && fabricRef.current) {
+    if (jobId && fabricRef.current && pageDims.length > 0) {
       loadPage(currentPage);
     }
-  }, [currentPage, jobId, loadPage]);
+  }, [currentPage, jobId, loadPage, pageDims]);
 
   // Switch pages
   const goToPage = (pageNum) => {
@@ -313,7 +413,7 @@ export default function PdfEditor({ onBack }) {
     if (!fabricRef.current) return;
     const canvas = fabricRef.current;
     const active = canvas.getActiveObject();
-    if (active) {
+    if (active && active.editType && active.editType !== "textBlockHitArea") {
       canvas.remove(active);
       canvas.renderAll();
     }
@@ -323,7 +423,9 @@ export default function PdfEditor({ onBack }) {
   const undoLast = () => {
     if (!fabricRef.current) return;
     const canvas = fabricRef.current;
-    const objects = canvas.getObjects().filter(obj => obj.editType);
+    const objects = canvas.getObjects().filter(
+      obj => obj.editType && obj.editType !== "textBlockHitArea"
+    );
     if (objects.length > 0) {
       canvas.remove(objects[objects.length - 1]);
       canvas.renderAll();
@@ -336,43 +438,62 @@ export default function PdfEditor({ onBack }) {
     savePageState(currentPage);
     setSaving(true);
     setError(null);
+    setSaved(false);
 
     try {
       const allEdits = [];
-      const canvas = fabricRef.current;
 
       for (let p = 0; p < pageCount; p++) {
         const objects = pageEditsRef.current[p];
         if (!objects || objects.length === 0) continue;
 
         const pageDim = pageDims[p];
-        const canvasWidth = canvas.getWidth();
-        const scaleFactor = pageDim.width / canvasWidth;
+        const pdfToCanvas = scaleRef.current;
+        const canvasToPdf = 1 / pdfToCanvas;
 
         objects.forEach(obj => {
           if (obj.editType === "whiteout") {
             allEdits.push({
               type: "whiteout",
               page: p,
-              x: (obj.left || 0) * scaleFactor,
-              y: (obj.top || 0) * scaleFactor,
-              width: (obj.width || 0) * (obj.scaleX || 1) * scaleFactor,
-              height: (obj.height || 0) * (obj.scaleY || 1) * scaleFactor,
+              x: (obj.left || 0) * canvasToPdf,
+              y: (obj.top || 0) * canvasToPdf,
+              width: (obj.width || 0) * (obj.scaleX || 1) * canvasToPdf,
+              height: (obj.height || 0) * (obj.scaleY || 1) * canvasToPdf,
               backgroundColor: obj.editWhiteoutColor || obj.fill || "#ffffff",
             });
           } else if (obj.editType === "text") {
             allEdits.push({
               type: "text",
               page: p,
-              x: (obj.left || 0) * scaleFactor,
-              y: (obj.top || 0) * scaleFactor,
-              width: (obj.width || 0) * (obj.scaleX || 1) * scaleFactor,
-              height: (obj.height || 0) * (obj.scaleY || 1) * scaleFactor,
+              x: (obj.left || 0) * canvasToPdf,
+              y: (obj.top || 0) * canvasToPdf,
+              width: (obj.width || 0) * (obj.scaleX || 1) * canvasToPdf,
+              height: (obj.height || 0) * (obj.scaleY || 1) * canvasToPdf,
               text: obj.text || "",
-              fontSize: (obj.editFontSize || obj.fontSize || 16) * scaleFactor,
+              fontSize: (obj.editFontSize || obj.fontSize || 14) * (obj.scaleX || 1),
               fontColor: obj.editFontColor || obj.fill || "#000000",
               bold: obj.editBold || obj.fontWeight === "bold",
               italic: obj.editItalic || obj.fontStyle === "italic",
+            });
+          } else if (obj.editType === "replaceText" && obj.originalBlock) {
+            const block = obj.originalBlock;
+            allEdits.push({
+              type: "replace",
+              page: p,
+              x: block.x,
+              y: block.y,
+              width: block.width,
+              height: block.height,
+              text: obj.text || "",
+              fontSize: block.fontSize,
+              fontColor: block.fontColor,
+              bold: block.bold,
+              italic: block.italic,
+              origX: block.x,
+              origY: block.y,
+              origWidth: block.width,
+              origHeight: block.height,
             });
           }
         });
@@ -419,8 +540,13 @@ export default function PdfEditor({ onBack }) {
         }
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "z") {
-        e.preventDefault();
-        undoLast();
+        if (fabricRef.current) {
+          const active = fabricRef.current.getActiveObject();
+          if (!active || !active.isEditing) {
+            e.preventDefault();
+            undoLast();
+          }
+        }
       }
     };
     window.addEventListener("keydown", handleKey);
@@ -475,6 +601,7 @@ export default function PdfEditor({ onBack }) {
                   Povucite PDF ovdje ili <span className="upload-link">odaberite datoteku</span>
                 </p>
                 <span className="format-pill">.pdf</span>
+                <p className="editor-hint">Dvaput kliknite na tekst za uredivanje</p>
               </>
             )}
           </div>
@@ -522,17 +649,15 @@ export default function PdfEditor({ onBack }) {
             <button
               className={`toolbar-btn ${activeTool === "select" ? "active" : ""}`}
               onClick={() => setActiveTool("select")}
-              title="Odaberi / Pomakni"
+              title="Odaberi / Pomakni (dvaput klikni na tekst za uredivanje)"
               data-testid="tool-select"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/>
-              </svg>
+              <MousePointer size={16} />
             </button>
             <button
               className={`toolbar-btn ${activeTool === "text" ? "active" : ""}`}
               onClick={() => setActiveTool("text")}
-              title="Dodaj tekst"
+              title="Dodaj novi tekst"
               data-testid="tool-text"
             >
               <Type size={16} />
@@ -540,7 +665,7 @@ export default function PdfEditor({ onBack }) {
             <button
               className={`toolbar-btn ${activeTool === "whiteout" ? "active" : ""}`}
               onClick={() => setActiveTool("whiteout")}
-              title="Whiteout"
+              title="Whiteout - prekrij sadrzaj"
               data-testid="tool-whiteout"
             >
               <Square size={16} />
@@ -637,6 +762,10 @@ export default function PdfEditor({ onBack }) {
             <button className="toolbar-btn" onClick={deleteSelected} title="Obrisi odabrano (Del)" data-testid="delete-btn">
               <Trash2 size={16} />
             </button>
+          </div>
+
+          <div className="toolbar-hint">
+            <span>Dvaput klikni na tekst za uredivanje</span>
           </div>
         </div>
 

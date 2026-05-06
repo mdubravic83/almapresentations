@@ -1,0 +1,43 @@
+{
+  "summary": "Validated PDF Editor click-to-edit + replace feature end-to-end. Backend: 15/15 pytest cases pass including 4 new tests for /api/editor/text-blocks endpoint and 2 new tests for 'replace' edit type (verified replacement text is actually present in downloaded PDF using PyMuPDF). Frontend: All 15 Playwright flow steps pass including double-click on existing text activating inline IText edit, whiteout drawing, new text, save with 'Spremljeno' message, undo, back navigation. The new feature works correctly: double-click on 'Customer: Ivan Horvat' / 'Date: ...' areas activates the IText pre-filled with original text; on save it round-trips through 'replace' type that whiteouts original bbox + inserts new text at same position.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/editor/save/{job_id}", "issue": "EditorEditItem.type still allows arbitrary strings (not Literal['text','whiteout','replace']); invalid types are silently skipped instead of 422."},
+      {"endpoint": "/api/editor/text-blocks/{job_id}/{page_num}", "issue": "Endpoint reopens PDF with fitz on every call - fine for now but could be cached per-job for large PDFs."},
+      {"endpoint": "/api/editor/save (replace)", "issue": "Replace inserts text at fontSize from request without measuring text width; long replacement strings may overflow the original bbox. Frontend does not warn user."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "PDF Editor toolbar", "issues": ["Dev-mode hydration console warning: <span> as child of <option> due to Emergent's x-source instrumentation injecting span into option elements rendered from FONT_SIZES.map. Not a real bug but pollutes console."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_pdf_editor.py",
+    "/app/test_reports/pytest/pdf_editor_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Tighten EditorEditItem.type with pydantic Literal['text','whiteout','replace'] for 422 on bad input.",
+    "(Optional) When inline-edited text is much longer than original bbox, expand the whiteout/insert rectangle to fit, otherwise text may be clipped.",
+    "(Optional) Cache loaded fitz Documents per job_id to avoid reopening on every text-blocks request.",
+    "(Optional - cosmetic) Avoid hydration warning by ensuring FONT_SIZES options render plain text (works at runtime, only dev-mode warning)."
+  ],
+  "critical_code_review_comments": [
+    "PdfEditor.js is 813 lines - approaching the 700-line guideline. Recommend splitting Toolbar, Canvas, Upload screens into separate components.",
+    "scaleRef.current is shared across all pages, but if pages have different widths the per-page scale on save may use the latest page's scale instead of the one the edit was authored under. For uniform-size invoices this is fine; for mixed-size PDFs edits on prior pages could be mis-coordinated.",
+    "activateTextBlockEditing creates an IText with fontFamily 'Helvetica' regardless of the original block.fontName; visually preserved okay but the original font is lost. Backend uses Helvetica variants too, so this is consistent end-to-end.",
+    "Replace edit uses the original block's bold/italic flags from frontend state - if user toggles bold/italic via toolbar while editing, those changes are not propagated to the saved replace edit (only original block flags are sent at line ~488-497).",
+    "/tmp/pdf_editor jobs still accumulate without cleanup."
+  ],
+  "updated_files": ["/app/backend/tests/test_pdf_editor.py"],
+  "success_rate": {"backend": "100% (15/15)", "frontend": "100% (15/15 flow steps)"},
+  "test_credentials": "N/A - no auth",
+  "seed_data_creation": "Used existing /tmp/test_invoice2.pdf for upload/replace tests. Generated /tmp/_test_replaced.pdf during replace verification.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "PDF Editor now supports click-to-edit. Backend: GET /api/editor/text-blocks/{job_id}/{page_num} returns blocks with x/y/width/height (PDF coords), fontSize, fontColor (#hex), fontName, bold, italic. POST /api/editor/save accepts new 'replace' type with origX/origY/origWidth/origHeight to whiteout original then insert new text. Frontend creates invisible Rect hit areas at scaled positions; double-click triggers IText edit mode (verified working in Playwright at canvas point ~100,370 corresponding to a text line). Tests at /app/backend/tests/test_pdf_editor.py (15 tests, all pass in ~3s). The replace test downloads the PDF and verifies 'TEST_REPLACED' string appears in the output via fitz.get_text().",
+  "rca of the issue": "No bugs to RCA - feature works as specified. The replace flow correctly: (1) frontend captures original block bbox, (2) sends origX/origY/origWidth/origHeight in save payload, (3) backend fitz draws white rect over orig bbox, (4) backend inserts new text at fitz.Point(origX, origY + fontSize), (5) downloaded PDF contains the new text and original is covered."
+}
